@@ -8,6 +8,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, message: "Backend is running" });
+});
+
 app.get("/", (req, res) => {
   res.send("Backend running");
 });
