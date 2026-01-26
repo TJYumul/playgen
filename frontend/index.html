@@ -4,89 +4,10 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Supabase Auth Test</title>
-    <style>
-      :root {
-        color-scheme: light dark;
-        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      }
-      body {
-        margin: 0;
-        padding: 24px;
-        display: grid;
-        place-items: start center;
-      }
-      #app {
-        width: min(720px, 100%);
-        border: 1px solid rgba(127, 127, 127, 0.35);
-        border-radius: 12px;
-        padding: 20px;
-      }
-      h1 {
-        margin: 0 0 16px;
-        font-size: 20px;
-      }
-      .controls {
-        display: flex;
-        gap: 12px;
-        margin: 12px 0 16px;
-      }
-      button {
-        padding: 10px 14px;
-        border-radius: 10px;
-        border: 1px solid rgba(127, 127, 127, 0.45);
-        background: transparent;
-        cursor: pointer;
-      }
-      button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-      }
-      .row {
-        display: grid;
-        grid-template-columns: 160px 1fr;
-        gap: 10px;
-        padding: 6px 0;
-      }
-      #errorBox {
-        margin-top: 12px;
-        padding: 10px;
-        border-radius: 10px;
-        border: 1px solid rgba(220, 60, 60, 0.55);
-        color: rgb(220, 60, 60);
-        white-space: pre-wrap;
-      }
-      code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-    </style>
+    <title>Playgen</title>
   </head>
   <body>
-    <div id="app">
-      <h1>Supabase Authentication Login Test</h1>
-      <div class="controls">
-        <button id="loginBtn" type="button">Login with Google</button>
-        <button id="logoutBtn" type="button" disabled>Logout</button>
-      </div>
-
-      <section aria-label="Auth status">
-        <div class="row">
-          <div><strong>Status</strong></div>
-          <div><span id="authStatus">loading…</span></div>
-        </div>
-        <div class="row">
-          <div><strong>Email</strong></div>
-          <div><code id="userEmail">—</code></div>
-        </div>
-        <div class="row">
-          <div><strong>User ID</strong></div>
-          <div><code id="userId">—</code></div>
-        </div>
-      </section>
-
-      <div id="errorBox" hidden></div>
-    </div>
-
-    <script type="module" src="/src/main.js"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
