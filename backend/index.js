@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { fetchJamendoTracks } from "./services/jamendoService.js";
 import { normalizeJamendoTrack } from "./utils/normalizeSong.js";
 import { listSongs, upsertSongs } from "./services/songService.js";
+import { insertEvent, isValidUuid } from "./eventService.js";
 
 dotenv.config();
 
@@ -69,6 +70,62 @@ app.get("/api/tracks", async (req, res) => {
   } catch (err) {
     console.error("[tracks] Failed:", err);
     res.status(500).json({ error: err?.message ?? "Unknown error" });
+  }
+});
+
+/**
+ * Log playback events from the frontend.
+ *
+ * POST /api/events
+ * Body:
+ * {
+ *   "user_id": "uuid",
+ *   "song_id": "uuid",
+ *   "event_type": "play" | "pause" | "skip" | "complete" | string,
+ *   "timestamp": "ISO string" // optional
+ * }
+ */
+app.post("/api/events", async (req, res) => {
+  try {
+    const { user_id, song_id, event_type, timestamp } = req.body ?? {};
+
+    if (!isValidUuid(user_id)) {
+      return res.status(400).json({ error: "Invalid user_id (expected UUID)" });
+    }
+
+    if (!isValidUuid(song_id)) {
+      return res.status(400).json({ error: "Invalid song_id (expected UUID)" });
+    }
+
+    if (typeof event_type !== "string" || event_type.trim().length === 0) {
+      return res.status(400).json({ error: "Invalid event_type (expected non-empty string)" });
+    }
+
+    let normalizedTimestamp;
+    if (timestamp !== undefined && timestamp !== null && timestamp !== "") {
+      if (typeof timestamp !== "string") {
+        return res.status(400).json({ error: "Invalid timestamp (expected ISO string)" });
+      }
+
+      const parsed = new Date(timestamp);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: "Invalid timestamp (must be a valid ISO date string)" });
+      }
+
+      normalizedTimestamp = parsed.toISOString();
+    }
+
+    const eventId = await insertEvent({
+      user_id: user_id.trim(),
+      song_id: song_id.trim(),
+      event_type: event_type.trim(),
+      ...(normalizedTimestamp ? { timestamp: normalizedTimestamp } : {})
+    });
+
+    return res.json({ success: true, event_id: eventId });
+  } catch (err) {
+    console.error("[events] Failed:", err);
+    return res.status(500).json({ error: err?.message ?? "Unknown error" });
   }
 });
 
