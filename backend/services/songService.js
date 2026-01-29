@@ -46,3 +46,43 @@ export async function upsertSongs(songs) {
 
   return Array.isArray(data) ? data.length : songs.length;
 }
+
+/**
+ * Fetch songs from the `songs` table.
+ *
+ * @param {{ limit?: number }} [options]
+ * @returns {Promise<Array<{ id: string, title: string, artist: string, audio_url: string, cover_url: string }>>}
+ */
+export async function listSongs({ limit = 200 } = {}) {
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from("songs")
+    .select("jamendo_id,title,artist,audio_url,image_url,popularity")
+    .order("popularity", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  const rows = Array.isArray(data) ? data : [];
+
+  return rows
+    .map((row) => {
+      const id = row?.jamendo_id;
+      const title = row?.title;
+      const artist = row?.artist;
+      const audioUrl = row?.audio_url;
+      const coverUrl = row?.image_url;
+
+      if (!id || !title || !artist || !audioUrl) return null;
+
+      return {
+        id: String(id),
+        title: String(title),
+        artist: String(artist),
+        audio_url: String(audioUrl),
+        cover_url: coverUrl ? String(coverUrl) : ""
+      };
+    })
+    .filter(Boolean);
+}
