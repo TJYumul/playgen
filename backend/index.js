@@ -80,7 +80,7 @@ app.get("/api/tracks", async (req, res) => {
  * Body:
  * {
  *   "user_id": "uuid",
- *   "song_id": "uuid",
+ *   "song_id": "string", // uuid or numeric/string id
  *   "event_type": "play" | "pause" | "skip" | "complete" | string,
  *   "timestamp": "ISO string" // optional
  * }
@@ -89,12 +89,19 @@ app.post("/api/events", async (req, res) => {
   try {
     const { user_id, song_id, event_type, timestamp } = req.body ?? {};
 
+    console.info("[events] Incoming", {
+      user_id,
+      song_id,
+      event_type,
+      timestamp
+    });
+
     if (!isValidUuid(user_id)) {
       return res.status(400).json({ error: "Invalid user_id (expected UUID)" });
     }
 
-    if (!isValidUuid(song_id)) {
-      return res.status(400).json({ error: "Invalid song_id (expected UUID)" });
+    if (typeof song_id !== "string" || song_id.trim().length === 0) {
+      return res.status(400).json({ error: "Invalid song_id (expected non-empty string)" });
     }
 
     if (typeof event_type !== "string" || event_type.trim().length === 0) {

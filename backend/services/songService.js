@@ -58,7 +58,7 @@ export async function listSongs({ limit = 200 } = {}) {
 
   const { data, error } = await supabase
     .from("songs")
-    .select("jamendo_id,title,artist,audio_url,image_url,popularity")
+     .select("id,jamendo_id,title,artist,audio_url,image_url,popularity")
     .order("popularity", { ascending: false })
     .limit(limit);
 
@@ -68,7 +68,7 @@ export async function listSongs({ limit = 200 } = {}) {
 
   return rows
     .map((row) => {
-      const id = row?.jamendo_id;
+      const id = row?.id;
       const title = row?.title;
       const artist = row?.artist;
       const audioUrl = row?.audio_url;
@@ -81,7 +81,9 @@ export async function listSongs({ limit = 200 } = {}) {
         title: String(title),
         artist: String(artist),
         audio_url: String(audioUrl),
-        cover_url: coverUrl ? String(coverUrl) : ""
+        cover_url: coverUrl ? String(coverUrl) : "",
+        // Keep Jamendo id available for debugging/attribution if needed.
+        jamendo_id: row?.jamendo_id ? String(row.jamendo_id) : undefined
       };
     })
     .filter(Boolean);
