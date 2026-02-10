@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { Button } from "./ui/button"
 import { Slider } from "./ui/slider"
 import {
@@ -11,10 +11,13 @@ import {
   Repeat,
   Shuffle,
   Heart,
+  ThumbsDown,
   PictureInPicture2,
   ListMusic,
   Mic2,
 } from "lucide-react"
+
+import { useAuth } from "./AuthProvider"
 
 type Track = {
   id: string
@@ -24,20 +27,19 @@ type Track = {
   cover_url?: string
 }
 
-function logPlay(songId: string) {
-  console.log("[logPlay]", { songId, at: new Date().toISOString() })
+type PlayerEventType = "play" | "pause" | "skip" | "complete" | "like" | "dislike"
+
+function isValidUuid(value: unknown): value is string {
+  if (typeof value !== "string") return false
+  const v = value.trim()
+  if (!v) return false
+  // UUID versions 1-5.
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
 }
 
-function logPause(songId: string) {
-  console.log("[logPause]", { songId, at: new Date().toISOString() })
-}
-
-function logSkip(songId: string) {
-  console.log("[logSkip]", { songId, at: new Date().toISOString() })
-}
-
-export default function MusicPlayerBar() {
+export default function MusicPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const { user } = useAuth()
 
   const [songList, setSongList] = useState<Track[]>([])
   const [currentSongIndex, setCurrentSongIndex] = useState(-1)
@@ -49,12 +51,86 @@ export default function MusicPlayerBar() {
   const [volume, setVolume] = useState([75])
   const [isMuted, setIsMuted] = useState(false)
   const [isLiked, setIsLiked] = useState(false)
+  const [isDisliked, setIsDisliked] = useState(false)
 
 
   const currentSong = useMemo(() => {
     if (currentSongIndex < 0) return null
     return songList[currentSongIndex] ?? null
   }, [songList, currentSongIndex])
+
+  const logEvent = useCallback(
+    async (eventType: PlayerEventType, songId: string | null | undefined) => {
+      const userId = user?.id
+      const timestamp = new Date().toISOString()
+
+      if (!isValidUuid(userId)) {
+        console.warn("[events] Skipping log: missing/invalid user_id", {
+          eventType,
+          songId,
+          timestamp,
+        })
+        return
+      }
+
+      if (typeof songId !== "string" || songId.trim().length === 0) {
+        console.warn("[events] Skipping log: missing/invalid song_id", {
+          eventType,
+          songId,
+          timestamp,
+        })
+        return
+      }
+
+      const normalizedSongId = songId.trim()
+
+      const body = {
+        user_id: userId,
+        song_id: normalizedSongId,
+        event_type: eventType,
+        timestamp,
+      }
+
+      try {
+        const res = await fetch("/api/events", {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        })
+
+        const text = await res.text().catch(() => "")
+        let parsed: unknown = null
+        try {
+          parsed = text ? JSON.parse(text) : null
+        } catch {
+          parsed = text
+        }
+
+        if (!res.ok) {
+          console.error("[events] Backend rejected event", {
+            status: res.status,
+            event: body,
+            response: parsed,
+          })
+          return
+        }
+
+        console.log("[events] Logged", {
+          event: body,
+          response: parsed,
+        })
+      } catch (err: unknown) {
+        console.error("[events] Failed to log event", {
+          event: body,
+          error: err,
+        })
+      }
+    },
+    [user?.id]
+  )
 
   const formatTime = (time: number) => {
     const minutes = Math.floor(time / 60)
@@ -116,8 +192,6 @@ export default function MusicPlayerBar() {
 
     try {
       await audio.play()
-      setIsPlaying(true)
-      logPlay(currentSong.id)
     } catch (err: unknown) {
       setIsPlaying(false)
       console.error("[player] play failed", err)
@@ -129,23 +203,23 @@ export default function MusicPlayerBar() {
     if (!audio) return
 
     audio.pause()
-    setIsPlaying(false)
-    if (currentSong) logPause(currentSong.id)
-  }, [currentSong])
+  }, [])
 
-  const nextSong = useCallback(async () => {
+  const nextSong = useCallback(async ({ reason = "user" }: { reason?: "user" | "auto" } = {}) => {
     if (!songList.length) return
 
-    if (currentSong) logSkip(currentSong.id)
+    if (reason === "user" && currentSong) {
+      void logEvent("skip", currentSong.id)
+    }
     const nextIndex = (currentSongIndex + 1) % songList.length
     loadSong(nextIndex)
 
     if (isPlaying) {
       await playSong()
     }
-  }, [songList.length, currentSong, currentSongIndex, loadSong, isPlaying, playSong])
+  }, [songList.length, currentSong, currentSongIndex, loadSong, isPlaying, playSong, logEvent])
 
-  const prevSong = useCallback(async () => {
+  const prevSong = useCallback(async ({ reason = "user" }: { reason?: "user" | "auto" } = {}) => {
     const audio = audioRef.current
     if (!audio || !songList.length) return
 
@@ -156,11 +230,33 @@ export default function MusicPlayerBar() {
       return
     }
 
-    if (currentSong) logSkip(currentSong.id)
+    if (reason === "user" && currentSong) {
+      void logEvent("skip", currentSong.id)
+    }
     const prevIndex = (currentSongIndex - 1 + songList.length) % songList.length
     loadSong(prevIndex)
     if (isPlaying) await playSong()
-  }, [songList.length, currentSong, currentSongIndex, loadSong, isPlaying, playSong])
+  }, [songList.length, currentSong, currentSongIndex, loadSong, isPlaying, playSong, logEvent])
+
+  const onLike = useCallback(() => {
+    if (!currentSong) return
+    const nextLiked = !isLiked
+    setIsLiked(nextLiked)
+    if (nextLiked) {
+      setIsDisliked(false)
+      void logEvent("like", currentSong.id)
+    }
+  }, [currentSong, isLiked, logEvent])
+
+  const onDislike = useCallback(() => {
+    if (!currentSong) return
+    const nextDisliked = !isDisliked
+    setIsDisliked(nextDisliked)
+    if (nextDisliked) {
+      setIsLiked(false)
+      void logEvent("dislike", currentSong.id)
+    }
+  }, [currentSong, isDisliked, logEvent])
 
   // Initial load.
   useEffect(() => {
@@ -181,8 +277,22 @@ export default function MusicPlayerBar() {
     }
 
     const onEnded = () => {
-      // Auto-advance
-      void nextSong()
+      // Natural completion.
+      void logEvent("complete", currentSong?.id)
+      // Auto-advance without counting as a user skip.
+      void nextSong({ reason: "auto" })
+    }
+
+    const onPlay = () => {
+      setIsPlaying(true)
+      void logEvent("play", currentSong?.id)
+    }
+
+    const onPause = () => {
+      setIsPlaying(false)
+      // Some browsers fire "pause" after "ended". Avoid double-logging.
+      if (audio.ended) return
+      void logEvent("pause", currentSong?.id)
     }
 
     const onError = () => {
@@ -194,15 +304,19 @@ export default function MusicPlayerBar() {
     audio.addEventListener("loadedmetadata", onLoadedMetadata)
     audio.addEventListener("timeupdate", onTimeUpdate)
     audio.addEventListener("ended", onEnded)
+    audio.addEventListener("play", onPlay)
+    audio.addEventListener("pause", onPause)
     audio.addEventListener("error", onError)
 
     return () => {
       audio.removeEventListener("loadedmetadata", onLoadedMetadata)
       audio.removeEventListener("timeupdate", onTimeUpdate)
       audio.removeEventListener("ended", onEnded)
+      audio.removeEventListener("play", onPlay)
+      audio.removeEventListener("pause", onPause)
       audio.removeEventListener("error", onError)
     }
-  }, [currentSong?.title, nextSong])
+  }, [currentSong?.id, currentSong?.title, logEvent, nextSong])
 
   // Apply volume/mute.
   useEffect(() => {
@@ -235,7 +349,7 @@ export default function MusicPlayerBar() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => setIsLiked(!isLiked)}
+            onClick={onLike}
             className={`text-zinc-400 hover:text-white ${
               isLiked ? "text-green-500" : ""
             }`}
@@ -243,6 +357,21 @@ export default function MusicPlayerBar() {
             <Heart
               className={`w-4 h-4 ${
                 isLiked ? "fill-current" : ""
+              }`}
+            />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onDislike}
+            className={`text-zinc-400 hover:text-white ${
+              isDisliked ? "text-red-500" : ""
+            }`}
+          >
+            <ThumbsDown
+              className={`w-4 h-4 ${
+                isDisliked ? "fill-current" : ""
               }`}
             />
           </Button>
@@ -254,7 +383,7 @@ export default function MusicPlayerBar() {
             <IconButton icon={<Shuffle />} />
             <IconButton
               icon={<SkipBack className="w-5 h-5" />}
-              onClick={() => void prevSong()}
+              onClick={() => void prevSong({ reason: "user" })}
               disabled={!songList.length}
             />
 
@@ -273,7 +402,7 @@ export default function MusicPlayerBar() {
 
             <IconButton
               icon={<SkipForward className="w-5 h-5" />}
-              onClick={() => void nextSong()}
+              onClick={() => void nextSong({ reason: "user" })}
               disabled={!songList.length}
             />
             <IconButton icon={<Repeat />} />
@@ -345,7 +474,7 @@ function IconButton({
   onClick,
   disabled,
 }: {
-  icon: React.ReactNode
+  icon: ReactNode
   onClick?: () => void
   disabled?: boolean
 }) {
