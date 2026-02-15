@@ -10,10 +10,12 @@ const JAMENDO_TRACKS_ENDPOINT = "https://api.jamendo.com/v3.0/tracks";
 /**
  * Fetch a list of Jamendo tracks.
  *
- * @param {{ clientId: string, limit?: number }} options
+ * Supports pagination via `offset`, and optional filtering via `genre` (mapped to Jamendo `tags`).
+ *
+ * @param {{ clientId: string, limit?: number, offset?: number, genre?: string }} options
  * @returns {Promise<Array<any>>}
  */
-export async function fetchJamendoTracks({ clientId, limit = 20 }) {
+export async function fetchJamendoTracks({ clientId, limit = 20, offset = 0, genre } = {}) {
   if (!clientId) throw new Error("Jamendo clientId is required");
 
   // Uses native fetch (Node 18+). If you’re on older Node, add node-fetch.
@@ -24,12 +26,20 @@ export async function fetchJamendoTracks({ clientId, limit = 20 }) {
   }
 
   const url = new URL(JAMENDO_TRACKS_ENDPOINT);
-  url.search = new URLSearchParams({
+  const params = new URLSearchParams({
     client_id: clientId,
     format: "json",
     limit: String(limit),
+    offset: String(offset),
     audioformat: "mp31"
-  }).toString();
+  });
+
+  // Jamendo uses `tags` for genre-style filtering.
+  if (genre && String(genre).trim().length > 0) {
+    params.set("tags", String(genre).trim());
+  }
+
+  url.search = params.toString();
 
   const response = await fetch(url, {
     method: "GET",
