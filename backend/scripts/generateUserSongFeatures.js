@@ -288,7 +288,10 @@ async function aggregateUserSongFeatures({
 
     const updatedAt = new Date().toISOString();
     const songDuration = songDurationCache.get(current.song_id) ?? 0;
-    const avgPlayDuration = current.play_count > 0 ? current.total_play_duration / current.play_count : 0;
+    // Some schemas store avg_play_duration as an integer (seconds). Round to avoid
+    // "invalid input syntax for type integer" errors during upsert.
+    const avgPlayDurationSeconds =
+      current.play_count > 0 ? Math.round(current.total_play_duration / current.play_count) : 0;
     const completionRate = songDuration > 0 ? clamp01(current.total_play_duration / songDuration) : 0;
 
     const lastPlayedAt =
@@ -301,7 +304,7 @@ async function aggregateUserSongFeatures({
       skip_count: current.skip_count,
       complete_count: current.complete_count,
       total_play_duration: current.total_play_duration,
-      avg_play_duration: avgPlayDuration,
+      avg_play_duration: avgPlayDurationSeconds,
       completion_rate: completionRate,
       last_played_at: lastPlayedAt,
       updated_at: updatedAt
