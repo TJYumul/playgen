@@ -44,7 +44,7 @@ export function isValidUuid(value) {
  *
  * NOTE: If `timestamp` is omitted, the DB column should default to now().
  *
- * @param {{ user_id: string, song_id: string, event_type: string, timestamp?: string }} payload
+ * @param {{ user_id: string, song_id: string, event_type: string, timestamp?: string, play_duration?: number }} payload
  * @returns {Promise<string>} Inserted event id
  */
 export async function insertEvent(payload) {
@@ -59,6 +59,20 @@ export async function insertEvent(payload) {
   // Only include timestamp if provided; otherwise rely on DB default now().
   if (payload.timestamp) {
     eventRow.timestamp = payload.timestamp;
+  }
+
+  // Only include play_duration if explicitly provided.
+  // Validate it is a non-negative, finite number (seconds).
+  if (payload.play_duration !== undefined && payload.play_duration !== null) {
+    if (typeof payload.play_duration !== "number" || !Number.isFinite(payload.play_duration)) {
+      throw new Error("Invalid play_duration (expected a non-negative number)");
+    }
+    if (payload.play_duration < 0) {
+      throw new Error("Invalid play_duration (must be >= 0)");
+    }
+
+    // Store as an integer number of seconds.
+    eventRow.play_duration = Math.floor(payload.play_duration);
   }
 
   const { data, error } = await supabase

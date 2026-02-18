@@ -29,6 +29,14 @@ type Track = {
 
 type PlayerEventType = "play" | "pause" | "skip" | "complete" | "like" | "dislike"
 
+function getCurrentPlayDuration(audioElement: HTMLAudioElement | null | undefined): number {
+  if (!audioElement) return 0
+  const currentTime = audioElement.currentTime
+  if (!Number.isFinite(currentTime)) return 0
+  if (currentTime <= 0) return 0
+  return Math.max(0, Math.floor(currentTime))
+}
+
 function isValidUuid(value: unknown): value is string {
   if (typeof value !== "string") return false
   const v = value.trim()
@@ -84,11 +92,30 @@ export default function MusicPlayer() {
 
       const normalizedSongId = songId.trim()
 
-      const body = {
+      const body: {
+        user_id: string
+        song_id: string
+        event_type: PlayerEventType
+        timestamp: string
+        play_duration?: number
+      } = {
         user_id: userId,
         song_id: normalizedSongId,
         event_type: eventType,
         timestamp,
+      }
+
+      // Only include play_duration for pause/skip/complete.
+      // pause/skip → currentTime; complete → duration (fallback to currentTime).
+      if (eventType === "pause" || eventType === "skip") {
+        body.play_duration = getCurrentPlayDuration(audioRef.current)
+      } else if (eventType === "complete") {
+        const audio = audioRef.current
+        const durationSeconds = audio && Number.isFinite(audio.duration) ? audio.duration : undefined
+        body.play_duration =
+          durationSeconds !== undefined && durationSeconds > 0
+            ? Math.max(0, Math.floor(durationSeconds))
+            : getCurrentPlayDuration(audio)
       }
 
       try {

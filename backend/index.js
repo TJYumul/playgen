@@ -87,13 +87,14 @@ app.get("/api/tracks", async (req, res) => {
  */
 app.post("/api/events", async (req, res) => {
   try {
-    const { user_id, song_id, event_type, timestamp } = req.body ?? {};
+    const { user_id, song_id, event_type, timestamp, play_duration } = req.body ?? {};
 
     console.info("[events] Incoming", {
       user_id,
       song_id,
       event_type,
-      timestamp
+      timestamp,
+      play_duration
     });
 
     if (!isValidUuid(user_id)) {
@@ -122,11 +123,25 @@ app.post("/api/events", async (req, res) => {
       normalizedTimestamp = parsed.toISOString();
     }
 
+    let normalizedPlayDuration;
+    if (play_duration !== undefined && play_duration !== null) {
+      if (typeof play_duration !== "number" || !Number.isFinite(play_duration)) {
+        return res.status(400).json({ error: "Invalid play_duration (expected a non-negative number)" });
+      }
+
+      if (play_duration < 0) {
+        return res.status(400).json({ error: "Invalid play_duration (must be >= 0)" });
+      }
+
+      normalizedPlayDuration = Math.floor(play_duration);
+    }
+
     const eventId = await insertEvent({
       user_id: user_id.trim(),
       song_id: song_id.trim(),
       event_type: event_type.trim(),
-      ...(normalizedTimestamp ? { timestamp: normalizedTimestamp } : {})
+      ...(normalizedTimestamp ? { timestamp: normalizedTimestamp } : {}),
+      ...(normalizedPlayDuration !== undefined ? { play_duration: normalizedPlayDuration } : {})
     });
 
     return res.json({ success: true, event_id: eventId });
