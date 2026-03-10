@@ -355,9 +355,9 @@ export default function MusicPlayer() {
 
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-black border-t border-zinc-800 p-3 z-50">
-      <div className="flex items-center justify-between gap-4">
+      <div className="grid grid-cols-3 items-center gap-4">
         {/* Now Playing */}
-        <div className="flex items-center gap-3 w-[30%] min-w-0">
+        <div className="flex items-center gap-3 min-w-0">
           <img
             src={currentSong?.cover_url || "/placeholder.svg"}
             alt="Album cover"
@@ -405,9 +405,12 @@ export default function MusicPlayer() {
         </div>
 
         {/* Controls */}
-        <div className="flex flex-col items-center gap-2 w-[40%]">
-          <div className="flex items-center gap-3">
-            <IconButton icon={<Shuffle />} />
+        <div className="flex flex-col items-center justify-center gap-1 justify-self-center w-full max-w-md">
+          <div className="flex items-center justify-center gap-3">
+            <IconButton
+              icon={<Shuffle className="h-3.5 w-3.5" />}
+              className="text-zinc-500 hover:text-white"
+            />
             <IconButton
               icon={<SkipBack className="w-5 h-5" />}
               onClick={() => void prevSong({ reason: "user" })}
@@ -415,15 +418,16 @@ export default function MusicPlayer() {
             />
 
             <Button
+              variant="ghost"
               size="icon"
               onClick={() => (isPlaying ? pauseSong() : void playSong())}
               disabled={!songList.length}
-              className="w-9 h-9 bg-white text-black hover:bg-gray-200"
+              className="h-10 w-10 text-zinc-400 hover:text-white hover:bg-zinc-800 hover:scale-105 transition-transform"
             >
               {isPlaying ? (
-                <Pause className="w-4 h-4" />
+                <Pause className="w-5 h-5" />
               ) : (
-                <Play className="w-4 h-4 ml-0.5" />
+                <Play className="w-5 h-5 ml-0.5" />
               )}
             </Button>
 
@@ -432,11 +436,14 @@ export default function MusicPlayer() {
               onClick={() => void nextSong({ reason: "user" })}
               disabled={!songList.length}
             />
-            <IconButton icon={<Repeat />} />
+            <IconButton
+              icon={<Repeat className="h-3.5 w-3.5" />}
+              className="text-zinc-500 hover:text-white"
+            />
           </div>
 
           <div className="flex items-center gap-2 w-full max-w-md">
-            <span className="text-zinc-400 text-xs w-10 text-right">
+            <span className="w-10 text-right text-[11px] text-zinc-400 font-medium leading-none">
               {formatTime(currentTime)}
             </span>
 
@@ -455,14 +462,14 @@ export default function MusicPlayer() {
               disabled={!songList.length || duration <= 0}
             />
 
-            <span className="text-zinc-400 text-xs w-10">
+            <span className="w-10 text-[11px] text-zinc-400 font-medium leading-none">
               {formatTime(duration)}
             </span>
           </div>
         </div>
 
         {/* Volume & Options */}
-        <div className="flex items-center gap-2 w-[30%] justify-end">
+        <div className="flex items-center gap-2 justify-self-end">
           <IconButton icon={<Mic2 />} />
           <IconButton icon={<ListMusic />} />
           <IconButton icon={<PictureInPicture2 />} />
@@ -485,7 +492,7 @@ export default function MusicPlayer() {
             max={100}
             step={1}
             onValueChange={setVolume}
-            className="w-24 hidden sm:block"
+            className="w-24 hidden sm:flex"
           />
         </div>
       </div>
@@ -500,16 +507,18 @@ function IconButton({
   icon,
   onClick,
   disabled,
+  className,
 }: {
   icon: ReactNode
   onClick?: () => void
   disabled?: boolean
+  className?: string
 }) {
   return (
     <Button
       variant="ghost"
       size="icon"
-      className="text-zinc-400 hover:text-white"
+      className={`h-8 w-8 text-zinc-400 hover:text-white ${className ?? ""}`}
       onClick={onClick}
       disabled={disabled}
     >
