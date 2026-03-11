@@ -29,12 +29,58 @@ type Track = {
 
 type PlayerEventType = "play" | "pause" | "skip" | "complete" | "like" | "dislike"
 
-function getCurrentPlayDuration(audioElement: HTMLAudioElement | null | undefined): number {
-  if (!audioElement) return 0
-  const currentTime = audioElement.currentTime
-  if (!Number.isFinite(currentTime)) return 0
-  if (currentTime <= 0) return 0
-  return Math.max(0, Math.floor(currentTime))
+type PlaybackSession = {
+  sessionId: string
+  songId: string
+  sessionStartTime: number
+  sessionStartAudioTime: number
+  lastAudioTime: number
+  ignoredBackwardSeekSeconds: number
+}
+
+function createSessionId(): string {
+  try {
+    // Browser support is good, but keep a fallback.
+    const cryptoAny = crypto as unknown as { randomUUID?: () => string }
+    if (typeof cryptoAny?.randomUUID === "function") return cryptoAny.randomUUID()
+  } catch {
+    // ignore
+  }
+
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function safeAudioTimeSeconds(audioElement: HTMLAudioElement | null | undefined): number {
+  const t = audioElement?.currentTime
+  return typeof t === "number" && Number.isFinite(t) ? t : 0
+}
+
+function computeActualPlayDurationSeconds(
+  audioElement: HTMLAudioElement,
+  session: PlaybackSession | null,
+  { backwardSeekToleranceSeconds = 2 }: { backwardSeekToleranceSeconds?: number } = {}
+): number {
+  if (!session) {
+    const fallback = safeAudioTimeSeconds(audioElement)
+    return Math.max(0, fallback)
+  }
+
+  const elapsedMs = Date.now() - session.sessionStartTime
+  const elapsedSeconds = Math.max(0, elapsedMs / 1000)
+
+  const currentAudioTime = safeAudioTimeSeconds(audioElement)
+  const rawAudioProgress = currentAudioTime - session.sessionStartAudioTime
+
+  // Optional: ignore small backward seeks by adding back a capped amount.
+  const ignoredBackward =
+    backwardSeekToleranceSeconds > 0
+      ? Math.min(session.ignoredBackwardSeekSeconds, backwardSeekToleranceSeconds)
+      : 0
+
+  const audioProgress = Math.max(0, rawAudioProgress + ignoredBackward)
+  const actualPlayDuration = Math.min(elapsedSeconds, audioProgress)
+
+  return Math.max(0, actualPlayDuration)
 }
 
 function isValidUuid(value: unknown): value is string {
@@ -48,6 +94,9 @@ function isValidUuid(value: unknown): value is string {
 export default function MusicPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const { user } = useAuth()
+
+  const playbackSessionRef = useRef<PlaybackSession | null>(null)
+  const suppressNextPauseRef = useRef(false)
 
   const [songList, setSongList] = useState<Track[]>([])
   const [currentSongIndex, setCurrentSongIndex] = useState(-1)
@@ -92,6 +141,20 @@ export default function MusicPlayer() {
 
       const normalizedSongId = songId.trim()
 
+      const audio = audioRef.current
+
+      // Initialize playback session state on play.
+      if (eventType === "play" && audio) {
+        playbackSessionRef.current = {
+          sessionId: createSessionId(),
+          songId: normalizedSongId,
+          sessionStartTime: Date.now(),
+          sessionStartAudioTime: safeAudioTimeSeconds(audio),
+          lastAudioTime: safeAudioTimeSeconds(audio),
+          ignoredBackwardSeekSeconds: 0,
+        }
+      }
+
       const body: {
         user_id: string
         song_id: string
@@ -106,16 +169,22 @@ export default function MusicPlayer() {
       }
 
       // Only include play_duration for pause/skip/complete.
-      // pause/skip → currentTime; complete → duration (fallback to currentTime).
-      if (eventType === "pause" || eventType === "skip") {
-        body.play_duration = getCurrentPlayDuration(audioRef.current)
-      } else if (eventType === "complete") {
-        const audio = audioRef.current
-        const durationSeconds = audio && Number.isFinite(audio.duration) ? audio.duration : undefined
-        body.play_duration =
-          durationSeconds !== undefined && durationSeconds > 0
-            ? Math.max(0, Math.floor(durationSeconds))
-            : getCurrentPlayDuration(audio)
+      // Use seek-safe "active listening" duration: min(elapsed wall time, audio progress).
+      if ((eventType === "pause" || eventType === "skip" || eventType === "complete") && audio) {
+        const session =
+          playbackSessionRef.current && playbackSessionRef.current.songId === normalizedSongId
+            ? playbackSessionRef.current
+            : null
+
+        const actualSeconds = computeActualPlayDurationSeconds(audio, session, {
+          backwardSeekToleranceSeconds: 2,
+        })
+
+        body.play_duration = Math.max(0, Math.floor(actualSeconds))
+
+        // End the current continuous session after a terminal-ish event.
+        // Next play will start a new session.
+        playbackSessionRef.current = null
       }
 
       try {
@@ -236,6 +305,7 @@ export default function MusicPlayer() {
     if (!songList.length) return
 
     if (reason === "user" && currentSong) {
+      suppressNextPauseRef.current = true
       void logEvent("skip", currentSong.id)
     }
     const nextIndex = (currentSongIndex + 1) % songList.length
@@ -258,6 +328,7 @@ export default function MusicPlayer() {
     }
 
     if (reason === "user" && currentSong) {
+      suppressNextPauseRef.current = true
       void logEvent("skip", currentSong.id)
     }
     const prevIndex = (currentSongIndex - 1 + songList.length) % songList.length
@@ -301,6 +372,12 @@ export default function MusicPlayer() {
 
     const onTimeUpdate = () => {
       setCurrentTime(Number.isFinite(audio.currentTime) ? audio.currentTime : 0)
+
+      const session = playbackSessionRef.current
+      if (session && session.songId === currentSong?.id) {
+        const t = safeAudioTimeSeconds(audio)
+        session.lastAudioTime = t
+      }
     }
 
     const onEnded = () => {
@@ -319,7 +396,32 @@ export default function MusicPlayer() {
       setIsPlaying(false)
       // Some browsers fire "pause" after "ended". Avoid double-logging.
       if (audio.ended) return
+
+      // Switching tracks can trigger a transient pause; don't double-log.
+      if (suppressNextPauseRef.current) {
+        suppressNextPauseRef.current = false
+        return
+      }
       void logEvent("pause", currentSong?.id)
+    }
+
+    const onSeeked = () => {
+      const session = playbackSessionRef.current
+      if (!session) return
+      if (session.songId !== currentSong?.id) return
+
+      const nextTime = safeAudioTimeSeconds(audio)
+      const prevTime = session.lastAudioTime
+      if (Number.isFinite(prevTime) && nextTime < prevTime) {
+        const backwardDelta = prevTime - nextTime
+        // Track small backward seeks so they don't artificially reduce "active listening".
+        // Large backward seeks are left as-is (they will reduce audioProgress).
+        if (backwardDelta > 0 && backwardDelta <= 2) {
+          session.ignoredBackwardSeekSeconds += backwardDelta
+        }
+      }
+
+      session.lastAudioTime = nextTime
     }
 
     const onError = () => {
@@ -333,6 +435,7 @@ export default function MusicPlayer() {
     audio.addEventListener("ended", onEnded)
     audio.addEventListener("play", onPlay)
     audio.addEventListener("pause", onPause)
+    audio.addEventListener("seeked", onSeeked)
     audio.addEventListener("error", onError)
 
     return () => {
@@ -341,6 +444,7 @@ export default function MusicPlayer() {
       audio.removeEventListener("ended", onEnded)
       audio.removeEventListener("play", onPlay)
       audio.removeEventListener("pause", onPause)
+      audio.removeEventListener("seeked", onSeeked)
       audio.removeEventListener("error", onError)
     }
   }, [currentSong?.id, currentSong?.title, logEvent, nextSong])

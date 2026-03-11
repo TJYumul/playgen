@@ -221,7 +221,7 @@ async function* fetchEvents(supabase, { limit, pageSize = 5000, timestampColumn 
 
 
 function isTerminalEventType(eventType) {
-  return eventType === "skip" || eventType === "complete";
+  return eventType === "pause" || eventType === "skip" || eventType === "complete";
 }
 
 /**
