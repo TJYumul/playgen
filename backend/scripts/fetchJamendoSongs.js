@@ -16,11 +16,72 @@
 
 import dotenv from "dotenv";
 import { randomUUID } from "node:crypto";
+import { createClient } from "@supabase/supabase-js";
 
 import { fetchJamendoTracks } from "../services/jamendoService.js";
-import { upsertSongs } from "../services/songService.js";
 
 dotenv.config();
+
+function getSupabaseClient() {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl) throw new Error("Missing SUPABASE_URL in environment");
+  if (!serviceRoleKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY in environment");
+
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false
+    }
+  });
+}
+
+function uniqStrings(values) {
+  const out = [];
+  const seen = new Set();
+  for (const v of values) {
+    const s = String(v ?? "").trim();
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
+/**
+ * Extract tags from Jamendo track objects.
+ *
+ * @param {any} track
+ * @returns {string[]}
+ */
+function extractTags(track) {
+  if (!track) return [];
+
+  /** @type {string[]} */
+  const tags = [];
+
+  if (typeof track.tags === "string") {
+    tags.push(...track.tags.split(/[,\s]+/g));
+  }
+
+  if (Array.isArray(track.tags)) {
+    tags.push(...track.tags);
+  }
+
+  const musicTags = track?.musicinfo?.tags;
+  if (musicTags) {
+    for (const key of ["genres", "instruments", "vartags", "themes", "moods"]) {
+      const v = musicTags?.[key];
+      if (Array.isArray(v)) tags.push(...v);
+      if (typeof v === "string") tags.push(...v.split(/[,\s]+/g));
+    }
+  }
+
+  return uniqStrings(tags).slice(0, 50);
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -115,9 +176,11 @@ async function withRetry(fn, { retries = 3, baseDelayMs = 750 } = {}) {
  * - image_url   -> track.image
  * - duration    -> track.duration
  * - popularity  -> track.popularity (fallbacks allowed)
+ * - tags        -> extracted tags (string array)
  * - created_at  -> current timestamp
  *
  * @param {any} track
+ * @param {{ fallbackTag?: string }} [options]
  * @returns {null | {
  *   id: string,
  *   jamendo_id: string,
@@ -127,10 +190,11 @@ async function withRetry(fn, { retries = 3, baseDelayMs = 750 } = {}) {
  *   image_url: string,
  *   duration: number,
  *   popularity: number,
+ *   tags: string[],
  *   created_at: string
  * }}
  */
-function mapTrackToSongRow(track) {
+function mapTrackToSongRow(track, { fallbackTag } = {}) {
   if (!track) return null;
 
   const jamendoId = track.id;
@@ -150,6 +214,12 @@ function mapTrackToSongRow(track) {
       0
   );
 
+  const extractedTags = extractTags(track);
+  const tags = extractedTags.length > 0 ? extractedTags : fallbackTag ? [String(fallbackTag)] : [];
+
+  // Ensure every ingested row has at least one tag.
+  if (tags.length === 0) return null;
+
   return {
     id: randomUUID(),
     jamendo_id: String(jamendoId),
@@ -159,6 +229,7 @@ function mapTrackToSongRow(track) {
     image_url: imageUrl ? String(imageUrl) : "",
     duration: Number.isFinite(duration) ? duration : 0,
     popularity: Number.isFinite(popularity) ? popularity : 0,
+    tags,
     created_at: new Date().toISOString()
   };
 }
@@ -175,20 +246,75 @@ function chunk(array, size) {
   return out;
 }
 
+/**
+ * Upsert a batch while preserving existing `songs.id` values.
+ *
+ * - Inserts rows that don't exist yet (includes `id` + `created_at`).
+ * - Updates rows that already exist (omits `id` + `created_at` to avoid changing PK).
+ *
+ * @param {import('@supabase/supabase-js').SupabaseClient} supabase
+ * @param {Array<any>} batch
+ * @returns {Promise<Array<{ id: string, jamendo_id: string }>>}
+ */
+async function upsertSongsPreservingIds(supabase, batch) {
+  const jamendoIds = batch.map((r) => String(r?.jamendo_id ?? "")).filter(Boolean);
+  if (jamendoIds.length === 0) return [];
+
+  const { data: existing, error: existingError } = await supabase
+    .from("songs")
+    .select("jamendo_id")
+    .in("jamendo_id", jamendoIds);
+
+  if (existingError) throw existingError;
+
+  const existingSet = new Set((existing ?? []).map((r) => String(r?.jamendo_id ?? "")).filter(Boolean));
+
+  const toInsert = batch.filter((r) => !existingSet.has(String(r.jamendo_id)));
+  const toUpdate = batch
+    .filter((r) => existingSet.has(String(r.jamendo_id)))
+    .map((r) => {
+      const { id, created_at, ...rest } = r;
+      return rest;
+    });
+
+  /** @type {Array<{ id: string, jamendo_id: string }>} */
+  const out = [];
+
+  if (toInsert.length > 0) {
+    const { data, error } = await supabase
+      .from("songs")
+      .insert(toInsert)
+      .select("id,jamendo_id");
+    if (error) throw error;
+    out.push(...(Array.isArray(data) ? data : []));
+  }
+
+  if (toUpdate.length > 0) {
+    const { data, error } = await supabase
+      .from("songs")
+      .upsert(toUpdate, { onConflict: "jamendo_id" })
+      .select("id,jamendo_id");
+    if (error) throw error;
+    out.push(...(Array.isArray(data) ? data : []));
+  }
+
+  return out;
+}
+
 async function main() {
   const jamendoClientId = process.env.JAMENDO_CLIENT_ID;
   if (!jamendoClientId) {
     throw new Error("Missing JAMENDO_CLIENT_ID in environment");
   }
 
-  // Supabase env vars are validated inside upsertSongs().
+  const supabase = getSupabaseClient();
 
   const argv = parseArgs(process.argv.slice(2));
 
   const limit = Number.isFinite(argv.limit) ? Math.min(Math.max(argv.limit, 1), 200) : 100;
   const startOffset = Number.isFinite(argv.offset) ? Math.max(argv.offset, 0) : 0;
   const batchSize = Number.isFinite(argv.batchSize) ? Math.min(Math.max(argv.batchSize, 1), 200) : 50;
-  const target = Number.isFinite(argv.target) ? Math.max(argv.target, 1) : 300;
+  const target = Number.isFinite(argv.target) ? Math.max(argv.target, 1) : 50;
 
   // Genres can be passed as --genres "rock,pop" or env JAMENDO_GENRES.
   const genreString = (argv.genres ?? process.env.JAMENDO_GENRES ?? "").trim();
@@ -208,6 +334,7 @@ async function main() {
   });
 
   let totalUpserted = 0;
+  let skippedNoTags = 0;
 
   // Prevent duplicates within this run (across pages + genres).
   const seenJamendoIds = new Set();
@@ -221,7 +348,14 @@ async function main() {
     while (totalUpserted < target) {
       // Fetch a page of tracks (with retry/backoff).
       const tracks = await withRetry(
-        () => fetchJamendoTracks({ clientId: jamendoClientId, limit, offset, genre: genre ?? undefined }),
+        () =>
+          fetchJamendoTracks({
+            clientId: jamendoClientId,
+            limit,
+            offset,
+            genre: genre ?? undefined,
+            includeMusicInfo: true
+          }),
         { retries: 4, baseDelayMs: 800 }
       ).catch((err) => {
         // Graceful handling: log and skip this page.
@@ -241,7 +375,14 @@ async function main() {
 
       // Map + dedupe by jamendo_id.
       const mapped = (tracks ?? [])
-        .map(mapTrackToSongRow)
+        .map((track) => {
+          const row = mapTrackToSongRow(track, {
+            // If the ingest is filtered by a genre, use it as a fallback tag.
+            fallbackTag: genre ?? undefined
+          });
+          if (!row) skippedNoTags += 1;
+          return row;
+        })
         .filter(Boolean)
         .filter((row) => {
           if (seenJamendoIds.has(row.jamendo_id)) return false;
@@ -259,8 +400,13 @@ async function main() {
         if (totalUpserted >= target) break;
 
         try {
-          const upserted = await upsertSongs(batch);
+          const returned = await upsertSongsPreservingIds(supabase, batch);
+          const upserted = Array.isArray(returned) ? returned.length : 0;
           totalUpserted += upserted;
+
+          for (const row of returned) {
+            console.log(`[inserted] id=${row?.id ?? "(unknown)"} jamendo_id=${row?.jamendo_id ?? ""}`);
+          }
 
           console.log(
             `[upsert] batch=${batch.length} upserted=${upserted} total=${totalUpserted}/${target}`
@@ -278,6 +424,7 @@ async function main() {
   }
 
   console.log("[ingest] Done", { totalUpserted, target });
+  console.log("[ingest] Skipped tracks with no tags", { skippedNoTags });
 
   // Exit when at least TARGET songs have been inserted/upserted.
   process.exit(totalUpserted >= target ? 0 : 1);
