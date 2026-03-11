@@ -6,6 +6,7 @@ import { fetchJamendoTracks } from "./services/jamendoService.js";
 import { normalizeJamendoTrack } from "./utils/normalizeSong.js";
 import { listSongs, upsertSongs } from "./services/songService.js";
 import { insertEvent, isValidUuid } from "./eventService.js";
+import { recomputeAndUpsertUserSongFeatures } from "./services/userSongFeaturesService.js";
 
 dotenv.config();
 
@@ -144,7 +145,37 @@ app.post("/api/events", async (req, res) => {
       ...(normalizedPlayDuration !== undefined ? { play_duration: normalizedPlayDuration } : {})
     });
 
-    return res.json({ success: true, event_id: eventId });
+    // Best-effort: recompute features from events for this (user,song).
+    // We don't want feature upsert failures to block event ingestion.
+    let featuresUpdated = false;
+    let featuresError = null;
+    try {
+      const normalizedEventType = event_type.trim().toLowerCase();
+      const shouldUpdateFeatures =
+        normalizedEventType === "play" ||
+        normalizedEventType === "pause" ||
+        normalizedEventType === "skip" ||
+        normalizedEventType === "complete";
+
+      if (shouldUpdateFeatures) {
+        await recomputeAndUpsertUserSongFeatures({
+          user_id: user_id.trim(),
+          song_id: song_id.trim()
+        });
+        featuresUpdated = true;
+      }
+    } catch (err) {
+      featuresUpdated = false;
+      featuresError = err?.message ?? String(err);
+      console.error("[events] Feature upsert failed (event still recorded):", err);
+    }
+
+    return res.json({
+      success: true,
+      event_id: eventId,
+      features_updated: featuresUpdated,
+      ...(featuresError ? { features_error: featuresError } : {})
+    });
   } catch (err) {
     console.error("[events] Failed:", err);
     return res.status(500).json({ error: err?.message ?? "Unknown error" });
