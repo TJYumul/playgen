@@ -5,10 +5,11 @@
  * - play_count: count(event_type = 'play')
  * - skip_count: count(event_type = 'skip')
  * - complete_count: count(event_type = 'complete')
- * - total_play_duration: sum(play_duration) across ALL events (null treated as 0)
- * - avg_play_duration: total_play_duration / play_count
- * - completion_rate: clamp(total_play_duration / songs.duration, 0..1)
- * - last_played_at: latest event timestamp
+ * - total_play_duration: sum of per-session max(play_duration)
+ *   (avoids double-counting when pause/skip both report the same progress)
+ * - avg_play_duration: total_play_duration / play_count (rounded seconds)
+ * - completion_rate: complete_count / play_count
+ * - last_played_at: most recent event timestamp
  * - updated_at: now()
  *
  * Notes:
@@ -177,13 +178,6 @@ function toNonNegativeNumber(value) {
   return num;
 }
 
-function clamp01(value) {
-  if (!Number.isFinite(value)) return 0;
-  if (value < 0) return 0;
-  if (value > 1) return 1;
-  return value;
-}
-
 /**
  * Fetch events in pages, ordered by (user_id, song_id, timestamp) so we can stream-aggregate.
  *
@@ -225,34 +219,9 @@ async function* fetchEvents(supabase, { limit, pageSize = 5000, timestampColumn 
   }
 }
 
-/**
- * Fetch song durations for a set of IDs, populating a cache.
- *
- * @param {ReturnType<typeof createClient>} supabase
- * @param {Map<string, number>} durationCache
- * @param {string[]} songIds
- */
-async function hydrateSongDurations(supabase, durationCache, songIds) {
-  const unique = Array.from(new Set(songIds)).filter(Boolean);
-  const missing = unique.filter((id) => !durationCache.has(id));
-  if (missing.length === 0) return;
 
-  const chunks = chunk(missing, 500);
-  for (const ids of chunks) {
-    const { data, error } = await supabase.from("songs").select("id,duration").in("id", ids);
-    if (error) throw error;
-
-    for (const row of Array.isArray(data) ? data : []) {
-      const id = normalizeId(row?.id);
-      const duration = toNonNegativeNumber(row?.duration);
-      if (id) durationCache.set(id, duration);
-    }
-
-    // If some songs weren't found, record 0 to avoid repeated lookups.
-    for (const id of ids) {
-      if (!durationCache.has(id)) durationCache.set(id, 0);
-    }
-  }
+function isTerminalEventType(eventType) {
+  return eventType === "skip" || eventType === "complete";
 }
 
 /**
@@ -268,10 +237,9 @@ async function hydrateSongDurations(supabase, durationCache, songIds) {
  */
 async function aggregateUserSongFeatures({
   eventPages,
-  songDurationCache,
   timestampColumn,
   onBatch,
-  batchSize = 500
+  batchSize = 50
 }) {
   let processedEvents = 0;
   let aggregatedRecords = 0;
@@ -279,20 +247,38 @@ async function aggregateUserSongFeatures({
   /** @type {Array<any>} */
   let buffer = [];
 
-  /** @type {null | { user_id: string, song_id: string, play_count: number, skip_count: number, complete_count: number, total_play_duration: number, last_played_ms: number | null }} */
+  /**
+   * @type {null | {
+   *   user_id: string,
+   *   song_id: string,
+   *   play_count: number,
+   *   skip_count: number,
+   *   complete_count: number,
+   *   total_play_duration: number,
+   *   last_played_ms: number | null,
+   *   session_max_duration: number,
+   *   last_duration_seen: number | null
+   * }}
+   */
   let current = null;
   let currentKey = null;
 
   const flushCurrent = async () => {
     if (!current) return;
 
+    // If we ended mid-session (e.g., last event is a pause), commit the max duration.
+    if (current.session_max_duration > 0) {
+      current.total_play_duration += current.session_max_duration;
+      current.session_max_duration = 0;
+      current.last_duration_seen = null;
+    }
+
     const updatedAt = new Date().toISOString();
-    const songDuration = songDurationCache.get(current.song_id) ?? 0;
     // Some schemas store avg_play_duration as an integer (seconds). Round to avoid
     // "invalid input syntax for type integer" errors during upsert.
     const avgPlayDurationSeconds =
       current.play_count > 0 ? Math.round(current.total_play_duration / current.play_count) : 0;
-    const completionRate = songDuration > 0 ? clamp01(current.total_play_duration / songDuration) : 0;
+    const completionRate = current.play_count > 0 ? current.complete_count / current.play_count : 0;
 
     const lastPlayedAt =
       current.last_played_ms !== null ? new Date(current.last_played_ms).toISOString() : updatedAt;
@@ -342,7 +328,9 @@ async function aggregateUserSongFeatures({
           skip_count: 0,
           complete_count: 0,
           total_play_duration: 0,
-          last_played_ms: null
+          last_played_ms: null,
+          session_max_duration: 0,
+          last_duration_seen: null
         };
         currentKey = key;
       }
@@ -352,8 +340,35 @@ async function aggregateUserSongFeatures({
       else if (eventType === "skip") current.skip_count += 1;
       else if (eventType === "complete") current.complete_count += 1;
 
-      // Requirement: treat null play_duration as 0.
-      current.total_play_duration += toNonNegativeNumber(evt?.play_duration);
+      // Treat play_duration as "progress within the current playback session".
+      // Some clients log the same progress on multiple events (e.g., pause + skip),
+      // so summing all play_duration values would double-count.
+      const duration = toNonNegativeNumber(evt?.play_duration);
+
+      // Detect a new session when progress resets (duration decreases vs previously seen).
+      if (
+        duration > 0 &&
+        current.last_duration_seen !== null &&
+        duration + 1 < current.last_duration_seen
+      ) {
+        current.total_play_duration += current.session_max_duration;
+        current.session_max_duration = 0;
+        current.last_duration_seen = null;
+      }
+
+      if (duration > current.session_max_duration) {
+        current.session_max_duration = duration;
+      }
+
+      if (duration > 0) {
+        current.last_duration_seen = duration;
+      }
+
+      if (isTerminalEventType(eventType)) {
+        current.total_play_duration += current.session_max_duration;
+        current.session_max_duration = 0;
+        current.last_duration_seen = null;
+      }
 
       const tsMs = parseTimestampMs(evt?.[timestampColumn]);
       if (tsMs !== null && (current.last_played_ms === null || tsMs > current.last_played_ms)) {
@@ -378,7 +393,7 @@ async function aggregateUserSongFeatures({
 async function upsertUserSongFeatures(supabase, featureRows) {
   if (!Array.isArray(featureRows) || featureRows.length === 0) return 0;
 
-  const batches = chunk(featureRows, 500);
+  const batches = chunk(featureRows, 50);
   let attempted = 0;
 
   for (const batch of batches) {
@@ -400,8 +415,6 @@ async function main() {
   const timestampColumn = await detectEventTimestampColumn(supabase);
   console.log(`[generateUserSongFeatures] Using events timestamp column: ${timestampColumn}`);
 
-  const songDurationCache = new Map();
-
   let totalUpsertsAttempted = 0;
   let totalEventsFetched = 0;
 
@@ -411,10 +424,6 @@ async function main() {
       ...(argv.limit !== undefined ? { limit: argv.limit } : {})
     })) {
       totalEventsFetched += page.length;
-
-      // Preload song durations for this page to avoid per-row lookups.
-      const pageSongIds = page.map((r) => normalizeId(r?.song_id)).filter(Boolean);
-      await hydrateSongDurations(supabase, songDurationCache, pageSongIds);
 
       if (totalEventsFetched % 50000 === 0) {
         console.log(`[generateUserSongFeatures] Fetched ${totalEventsFetched} events...`);
@@ -426,7 +435,6 @@ async function main() {
 
   const { processedEvents, aggregatedRecords } = await aggregateUserSongFeatures({
     eventPages,
-    songDurationCache,
     timestampColumn,
     onBatch: async (rows) => {
       const attempted = await upsertUserSongFeatures(supabase, rows);
